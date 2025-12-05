@@ -1,0 +1,124 @@
+
+<?php
+// -------------------------------
+// ADD ADMIN MENU
+// -------------------------------
+add_action('admin_menu', function () {
+    add_menu_page(
+        'HTML Value Tracker',
+        'Value Tracker',
+        'manage_options',
+        'html-value-tracker',
+        'html_value_tracker_page',
+        'dashicons-search',
+        90
+    );
+});
+
+// -------------------------------
+// ADMIN PAGE
+// -------------------------------
+function html_value_tracker_page()
+{
+    $html_input = isset($_POST['html_input']) ? wp_unslash($_POST['html_input']) : '';
+
+    echo '<div class="wrap"><h1>HTML Value Tracker</h1>';
+
+    echo '<form method="post">';
+    echo '<textarea name="html_input" rows="12" style="width:100%;">' . esc_textarea($html_input) . '</textarea>';
+    echo '<br><br><button class="button button-primary">Track Values</button>';
+    echo '</form><hr>';
+
+    if (!empty($html_input)) {
+
+        $results = html_value_dom_extract($html_input);
+
+        echo '<h2>Sequence Results</h2>';
+        echo '<ol style="font-size:16px; line-height:1.8;">';
+
+        foreach ($results as $item) {
+            echo '<li>';
+            echo '<div><strong>HTML:</strong> <code>' . esc_html($item['html']) . '</code></div>';
+            echo '<div><strong>Type:</strong> ' . esc_html($item['type']) . '</div>';
+            echo '<div><strong>Value:</strong> ' . esc_html($item['value']) . '</div>';
+            echo '</li><br>';
+        }
+
+        echo '</ol>';
+    }
+
+    echo '</div>';
+}
+
+// -------------------------------
+// DOM PARSER — ACCURATE EXTRACTION
+// -------------------------------
+function html_value_dom_extract($html)
+{
+    libxml_use_internal_errors(true);
+
+    $dom = new DOMDocument;
+    $dom->loadHTML('<?xml encoding="utf-8" ?>' . $html);
+
+    $xpath = new DOMXPath($dom);
+
+    // Select ALL nodes in order (elements + text)
+    $nodes = $xpath->query('//* | //text()');
+
+    $results = [];
+
+    foreach ($nodes as $node) {
+
+        // Build parent path (breadcrumb)
+        $pathParts = [];
+        $parent = $node;
+
+        while ($parent && $parent->nodeType === XML_ELEMENT_NODE) {
+            $pathParts[] = $parent->nodeName;
+            $parent = $parent->parentNode;
+        }
+
+        $pathParts = array_reverse($pathParts);
+        $path = implode(" > ", $pathParts);
+
+        // --------------------------------
+        // TEXT NODE
+        // --------------------------------
+        if ($node->nodeType === XML_TEXT_NODE) {
+
+            $text = trim($node->nodeValue);
+
+            if ($text !== '') {
+                $results[] = [
+                    'html'   => $node->parentNode->C14N(),
+                    'type'   => 'Text',
+                    'value'  => $text,
+                    'parent' => $node->parentNode->nodeName,
+                    'path'   => $path,
+                ];
+            }
+
+            continue;
+        }
+
+        // --------------------------------
+        // ELEMENT NODE
+        // --------------------------------
+        $htmlCode = trim($node->C14N());
+
+        // Attributes
+        if ($node->hasAttributes()) {
+            foreach ($node->attributes as $attr) {
+                $results[] = [
+                    'html'   => $htmlCode,
+                    'type'   => 'Attribute: ' . $attr->name,
+                    'value'  => $attr->value,
+                    'parent' => $node->nodeName,
+                    'path'   => $path,
+                ];
+            }
+        }
+    }
+
+    return $results;
+}
