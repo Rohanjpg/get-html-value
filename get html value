@@ -1,6 +1,84 @@
 <?php
-// 1. Register Customizer setting for dynamic sections
-function custom_dynamic_sections_customize_register($wp_customize) {
+/*
+Plugin Name: Dynamic Customizer Sections Builder
+Description: Create unlimited Customizer panels, sections & controls dynamically from an admin page. Includes auto-generated PHP snippets.
+Version: 1.5
+Author: Bhagwan Singh
+*/
+
+/**
+ * FULL HTML SUPPORT — ALL TAGS + ALL ATTRIBUTES
+ */
+function dcsb_allow_all_html() {
+
+    $allowed = [];
+
+    // All HTML5 tags
+    $html5_tags = [
+        'div','span','p','a','img','strong','em','b','i','u','br','hr',
+        'section','article','header','footer','nav','main','aside',
+        'figure','figcaption','video','audio','source','canvas','svg',
+        'path','iframe','details','summary','dialog','template','slot',
+        'ul','ol','li','table','thead','tbody','tr','td','th','form',
+        'input','button','select','option','textarea','label','small',
+        'h1','h2','h3','h4','h5','h6'
+    ];
+
+    // Allow ALL attributes on ALL listed tags
+    foreach ($html5_tags as $tag) {
+        $allowed[$tag] = [
+            '*'      => true, // allow ANY attribute
+            'class'  => true, // ensure class always allowed
+            'id'     => true, 
+            'style'  => true, 
+        ];
+    }
+
+    return $allowed;
+}
+
+
+/**
+ * Enable ALL attributes including class, id, style, data-*, aria-*
+ * WordPress blocks some even when '*' is allowed — this fixes it.
+ */
+add_filter('wp_kses_allowed_html', function($allowed, $context) {
+
+    // Only modify HTML for our custom textarea usage
+    if ($context !== 'post') return $allowed;
+
+    if (!is_array($allowed)) return $allowed;
+
+    foreach ($allowed as $tag => $attrs) {
+
+        // Guarantee class/id/style are always allowed even if WP blocks them
+        $allowed[$tag]['class'] = true;
+        $allowed[$tag]['id']    = true;
+        $allowed[$tag]['style'] = true;
+
+        // Also allow ANY other attribute (e.g. data-x, aria-label)
+        $allowed[$tag]['*'] = true;
+    }
+
+    return $allowed;
+
+}, 10, 2);
+
+
+/**
+ * Allow full HTML inside textarea fields.
+ */
+function dcsb_sanitize_textarea_html($input){
+    // Use "post" context to apply wp_kses_allowed_html filter above
+    return wp_kses($input, dcsb_allow_all_html(), 'post');
+}
+
+
+/* -------------------------------------------------
+  1. Register Customizer setting for storing JSON
+---------------------------------------------------- */
+function dcsb_customize_register($wp_customize) {
+
     $wp_customize->add_section('dynamic_sections_container', [
         'title'       => 'Dynamic Sections',
         'priority'    => 10,
@@ -17,29 +95,51 @@ function custom_dynamic_sections_customize_register($wp_customize) {
         'type'    => 'hidden',
     ]);
 }
-add_action('customize_register', 'custom_dynamic_sections_customize_register');
+add_action('customize_register', 'dcsb_customize_register');
 
-// 2. Dynamically create sections & controls in Customizer
+/* -------------------------------------------------
+  2. Build dynamic Customizer panels/sections/controls
+---------------------------------------------------- */
 add_action('customize_register', function($wp_customize){
+
     $sections_json = get_option('dynamic_sections_data', '[]');
     $sections = json_decode($sections_json, true);
 
-    if(!empty($sections) && is_array($sections)) {
+    if(!empty($sections) && is_array($sections)){
+
+        $panels = [];
+
         foreach($sections as $section){
+
+            $panel_id = sanitize_title($section['panel'] ?? '');
+
+            if($panel_id && !isset($panels[$panel_id])){
+                $panels[$panel_id] = true;
+
+                $wp_customize->add_panel($panel_id, [
+                    'title'    => $section['panel'],
+                    'priority' => 5,
+                ]);
+            }
+
             $section_id = sanitize_title($section['id'] ?? $section['title']);
+
             $wp_customize->add_section($section_id, [
                 'title'    => $section['title'],
                 'priority' => $section['priority'] ?? 30,
+                'panel'    => $panel_id ?: null,
             ]);
 
             if(!empty($section['controls'])){
                 foreach($section['controls'] as $control){
-                    $setting_id = !empty($control['setting_id']) ? $control['setting_id'] : $section_id . '_' . sanitize_title($control['label']);
 
-                    // Determine sanitize callback
+                    $setting_id = $control['setting_id']
+                        ?: $section_id . '_' . sanitize_title($control['label']);
+
+                    // Sanitizers
                     $sanitize = 'sanitize_text_field';
-                    if($control['type'] === 'url') $sanitize = 'esc_url_raw';
-                    if($control['type'] === 'textarea') $sanitize = 'sanitize_textarea_field';
+                    if($control['type'] === 'url')      $sanitize = 'esc_url_raw';
+                    if($control['type'] === 'textarea') $sanitize = 'dcsb_sanitize_textarea_html';
 
                     $wp_customize->add_setting($setting_id, [
                         'default'           => $control['default'] ?? '',
@@ -47,12 +147,19 @@ add_action('customize_register', function($wp_customize){
                     ]);
 
                     if($control['type'] === 'image'){
-                        $wp_customize->add_control(new WP_Customize_Image_Control($wp_customize, $setting_id, [
-                            'label'    => $control['label'],
-                            'section'  => $section_id,
-                            'settings' => $setting_id,
-                        ]));
+
+                        $wp_customize->add_control(new WP_Customize_Image_Control(
+                            $wp_customize,
+                            $setting_id,
+                            [
+                                'label'    => $control['label'],
+                                'section'  => $section_id,
+                                'settings' => $setting_id,
+                            ]
+                        ));
+
                     } else {
+
                         $wp_customize->add_control($setting_id, [
                             'label'   => $control['label'],
                             'section' => $section_id,
@@ -65,200 +172,329 @@ add_action('customize_register', function($wp_customize){
     }
 });
 
-// 3. Add Admin Menu Page for creating sections & controls
-function custom_dynamic_sections_menu() {
+/* -------------------------------------------------
+  3. Admin Menu
+---------------------------------------------------- */
+function dcsb_menu(){
     add_menu_page(
-        'Dynamic Sections',        // page title
-        'Dynamic Sections',        // menu title
-        'manage_options',          // capability
-        'dynamic-sections',        // slug
-        'custom_dynamic_sections_admin_page', // callback
-        'dashicons-welcome-widgets-menus',    // icon
+        'Dynamic Sections',
+        'Dynamic Sections',
+        'manage_options',
+        'dynamic-sections',
+        'dcsb_admin_page',
+        'dashicons-welcome-widgets-menus',
         50
     );
 }
-add_action('admin_menu', 'custom_dynamic_sections_menu');
+add_action('admin_menu', 'dcsb_menu');
 
-// 4. Admin Page HTML & JS
-function custom_dynamic_sections_admin_page() {
+/* -------------------------------------------------
+  4. ADMIN PAGE UI + JAVASCRIPT
+---------------------------------------------------- */
+function dcsb_admin_page(){
+
     $sections = get_option('dynamic_sections_data', '[]');
     $sections = json_decode($sections, true) ?: [];
+
     ?>
     <div class="wrap">
-        <h1>Manage Dynamic Sections</h1>
+        <h1>Dynamic Customizer Sections</h1>
+
+        <h2 style="color:red;">
+            NOTE : First enter section title then automatic create section id + control id <br>
+            NOTE : Control id create by section_title + control_label <br>
+            NOTE : After edit , add , delete click save section <br>
+            NOTE : If create new section in same panel just add same panel name
+        </h2>
+
         <form method="post" action="options.php">
-            <?php settings_fields('custom_dynamic_sections_group'); ?>
+
+            <?php settings_fields('dcsb_group'); ?>
+
             <div id="dynamic_sections_wrapper">
+
                 <?php foreach($sections as $i => $section): ?>
-                    <div class="dynamic-section" data-index="<?php echo $i; ?>" style="margin-bottom:20px; padding:10px; border:1px solid #ccc;">
-                        <h2>Section <?php echo $i+1; ?></h2>
+                    <div class="dynamic-section" data-index="<?= $i; ?>" style="border:1px solid #ccc;padding:10px;margin-bottom:20px;">
+                        <h2>Section <?= $i+1; ?></h2>
+
                         <p>
-                            Title: <input type="text" name="section_title_<?php echo $i; ?>" class="section-title" value="<?php echo esc_attr($section['title']); ?>" />
-                            Priority: <input type="number" name="section_priority_<?php echo $i; ?>" class="section-priority" value="<?php echo esc_attr($section['priority']); ?>" style="width:60px;" />
+                            Panel: <input type="text" class="section-panel" value="<?= esc_attr($section['panel'] ?? ''); ?>">
                         </p>
+
+                        <p>
+                            Section ID: <input type="text" class="section-id" value="<?= esc_attr($section['id']); ?>" style="width:260px;">
+                        </p>
+
+                        <p>
+                            Title: <input type="text" class="section-title" value="<?= esc_attr($section['title']); ?>">
+                            Priority: <input type="number" class="section-priority" value="<?= esc_attr($section['priority']); ?>" style="width:60px;">
+                        </p>
+
                         <div class="controls-wrapper">
-                            <?php foreach($section['controls'] as $j => $control): ?>
-                                <div class="control-item" style="margin-bottom:5px;">
-                                    Label: <input type="text" class="control-label" value="<?php echo esc_attr($control['label']); ?>" />
-                                    Type: 
+
+                            <?php foreach($section['controls'] as $control): ?>
+                                <div class="control-item" style="margin-bottom:10px;">
+                                    Label: <input type="text" class="control-label" value="<?= esc_attr($control['label']); ?>">
+
+                                    Type:
                                     <select class="control-type">
-                                        <option value="text" <?php selected($control['type'], 'text'); ?>>Text</option>
-                                        <option value="url" <?php selected($control['type'], 'url'); ?>>URL</option>
-                                        <option value="textarea" <?php selected($control['type'], 'textarea'); ?>>Textarea</option>
-                                        <option value="image" <?php selected($control['type'], 'image'); ?>>Image</option>
+                                        <option value="text"     <?= selected($control['type'],'text'); ?>>Text</option>
+                                        <option value="url"      <?= selected($control['type'],'url'); ?>>URL</option>
+                                        <option value="textarea" <?= selected($control['type'],'textarea'); ?>>Textarea</option>
+                                        <option value="image"    <?= selected($control['type'],'image'); ?>>Image</option>
                                     </select>
-                                    Setting ID: <input type="text" class="control-setting-id" value="<?php echo esc_attr($control['setting_id'] ?? ''); ?>" />
-                                    <small>Use in theme: <code>&lt;?= dynamic_sections_get('<?php echo esc_attr($control['setting_id'] ?? ''); ?>'); ?&gt;</code></small>
+
+                                    Setting ID:
+                                    <input type="text" class="control-setting-id" value="<?= esc_attr($control['setting_id']); ?>">
+
+                                    <p class="php-snippet" style="margin-top:5px;font-family:monospace;background:#f7f7f7;padding:5px;">
+                                      <?php 
+$textarea = ($control['type'] === 'textarea') ? ", 'textarea'" : ''; 
+?>
+<?= htmlspecialchars("<?= dynamic_sections_get('".$control['setting_id']."'".$textarea."); ?>"); ?>
+
+                                    </p>
+
                                     <button class="remove-control button">Remove</button>
+
                                 </div>
                             <?php endforeach; ?>
+
                         </div>
+
                         <button class="add-control button">Add Control</button>
+                        <button class="delete-section button" style="background:#dc3545;color:#fff;">Delete Section</button>
+
                         <hr>
                     </div>
                 <?php endforeach; ?>
+
             </div>
-            <p>
-                <button id="add_section" class="button button-primary">Add New Section</button>
-            </p>
-            <input type="hidden" name="dynamic_sections_data" id="dynamic_sections_data_hidden" value='<?php echo esc_attr(json_encode($sections)); ?>' />
+
+            <button id="add_section" class="button button-primary">Add New Section</button>
+
+            <input type="hidden" name="dynamic_sections_data" id="dynamic_sections_data_hidden" value='<?= esc_attr(json_encode($sections)); ?>'>
+
             <?php submit_button('Save Sections'); ?>
+
         </form>
+
     </div>
 
-    <script>
-    jQuery(document).ready(function($){
-        function updateHiddenData(){
-            let sections = [];
-            $('#dynamic_sections_wrapper .dynamic-section').each(function(){
-                let sec = {};
-                sec.title = $(this).find('.section-title').val();
-                sec.priority = parseInt($(this).find('.section-priority').val()) || 30;
-                sec.controls = [];
-                $(this).find('.controls-wrapper .control-item').each(function(){
-                    sec.controls.push({
-                        label: $(this).find('.control-label').val(),
-                        type: $(this).find('.control-type').val(),
-                        setting_id: $(this).find('.control-setting-id').val()
-                    });
+<script>
+jQuery(function($){
+
+    function labelToSlug(label){
+        return label.toLowerCase().replace(/[^a-z0-9]+/g,'_').replace(/^_|_$/g,'');
+    }
+
+    function updateHiddenData(){
+        let sections = [];
+        $('#dynamic_sections_wrapper .dynamic-section').each(function(){
+
+            let sec = {
+                panel: $(this).find('.section-panel').val(),
+                id: $(this).find('.section-id').val(),
+                title: $(this).find('.section-title').val(),
+                priority: parseInt($(this).find('.section-priority').val()) || 30,
+                controls: []
+            };
+
+            $(this).find('.control-item').each(function(){
+                sec.controls.push({
+                    label: $(this).find('.control-label').val(),
+                    type: $(this).find('.control-type').val(),
+                    setting_id: $(this).find('.control-setting-id').val()
                 });
-                sections.push(sec);
             });
-            $('#dynamic_sections_data_hidden').val(JSON.stringify(sections));
-        }
 
-        $('#add_section').on('click', function(e){
-            e.preventDefault();
-            let index = $('#dynamic_sections_wrapper .dynamic-section').length;
-            let html = `<div class="dynamic-section" data-index="${index}" style="margin-bottom:20px; padding:10px; border:1px solid #ccc;">
-                <h2>Section ${index+1}</h2>
-                <p>
-                    Title: <input type="text" class="section-title" value="Section ${index+1}" />
-                    Priority: <input type="number" class="section-priority" value="${30+index}" style="width:60px;" />
-                </p>
-                <div class="controls-wrapper"></div>
-                <button class="add-control button">Add Control</button>
-                <hr>
-            </div>`;
-            $('#dynamic_sections_wrapper').append(html);
-            updateHiddenData();
+            sections.push(sec);
         });
 
-        $(document).on('click', '.add-control', function(e){
-            e.preventDefault();
-            let html = `<div class="control-item" style="margin-bottom:5px;">
-                Label: <input type="text" class="control-label" value="Text Field" />
-                Type: 
-                <select class="control-type">
-                    <option value="text">Text</option>
-                    <option value="url">URL</option>
-                    <option value="textarea">Textarea</option>
-                    <option value="image">Image</option>
-                </select>
-                Setting ID: <input type="text" class="control-setting-id" value="" />
-                <small>Use in theme: <code>&lt;?= dynamic_sections_get(''); ?&gt;</code></small>
-                <button class="remove-control button">Remove</button>
-            </div>`;
-            $(this).siblings('.controls-wrapper').append(html);
-            updateHiddenData();
-        });
+        $('#dynamic_sections_data_hidden').val(JSON.stringify(sections));
+    }
 
-        $(document).on('click', '.remove-control', function(e){
-            e.preventDefault();
-            $(this).parent('.control-item').remove();
-            updateHiddenData();
-        });
-
-        $(document).on('change', '.section-title, .section-priority, .control-label, .control-type, .control-setting-id', function(){
-            updateHiddenData();
-        });
-    });
-    </script>
-    <?php
+  function generateSnippet(settingId, type){
+    if (type === "textarea") {
+        return "<?= dynamic_sections_get('__ID__','textarea'); ?>".replace("__ID__", settingId);
+    }
+    return "<?= dynamic_sections_get('__ID__'); ?>".replace("__ID__", settingId);
 }
 
-// 5. Register setting for admin page
-add_action('admin_init', function(){
-    register_setting('custom_dynamic_sections_group', 'dynamic_sections_data');
+
+    function createControlHTML(label="Text Field", type="text", sectionId=""){
+        let slug = labelToSlug(label);
+        let settingId = sectionId ? sectionId + '_' + slug : slug;
+
+        return `<div class="control-item" style="margin-bottom:10px;">
+            Label: <input type="text" class="control-label" value="${label}">
+            Type:
+            <select class="control-type">
+                <option value="text" ${type==="text"?"selected":""}>Text</option>
+                <option value="url" ${type==="url"?"selected":""}>URL</option>
+                <option value="textarea" ${type==="textarea"?"selected":""}>Textarea</option>
+                <option value="image" ${type==="image"?"selected":""}>Image</option>
+            </select>
+
+            Setting ID: <input type="text" class="control-setting-id" value="${settingId}">
+
+            <p class="php-snippet" style="margin-top:5px;font-family:monospace;background:#f7f7f7;padding:5px;">
+                ${ generateSnippet(settingId, type) }
+            </p>
+
+            <button class="remove-control button">Remove</button>
+        </div>`;
+    }
+
+    $('#add_section').on('click', function(e){
+        e.preventDefault();
+
+        let index = $('#dynamic_sections_wrapper .dynamic-section').length;
+
+        let html = `<div class="dynamic-section" data-index="${index}" style="border:1px solid #ccc;padding:10px;margin-bottom:20px;">
+            <h2>Section ${index+1}</h2>
+
+            <p>Panel: <input type="text" class="section-panel"></p>
+
+            <p>Section ID: <input type="text" class="section-id" value="section_${index+1}" style="width:260px;"></p>
+
+            <p>Title: <input type="text" class="section-title" value="Section ${index+1}">
+            Priority: <input type="number" class="section-priority" value="${30+index}" style="width:60px;"></p>
+
+            <div class="controls-wrapper"></div>
+
+            <button class="add-control button">Add Control</button>
+            <button class="delete-section button" style="background:#dc3545;color:#fff;">Delete Section</button>
+
+            <hr>
+        </div>`;
+
+        $('#dynamic_sections_wrapper').append(html);
+        updateHiddenData();
+    });
+
+    $(document).on('click','.add-control', function(e){
+        e.preventDefault();
+
+        let $section = $(this).closest('.dynamic-section');
+        let sectionId = $section.find('.section-id').val();
+
+       $section.find('.controls-wrapper').append(
+    createControlHTML("Text Field","text",sectionId)
+);
+
+
+        updateHiddenData();
+    });
+
+    $(document).on('click','.remove-control', function(e){
+        e.preventDefault();
+        $(this).closest('.control-item').remove();
+        updateHiddenData();
+    });
+
+    $(document).on('click','.delete-section', function(e){
+        e.preventDefault();
+
+        if(confirm('Delete this section?')){
+            $(this).closest('.dynamic-section').remove();
+            updateHiddenData();
+        }
+    });
+
+$(document).on('change', '.control-type', function () {
+    let $control = $(this).closest('.control-item');
+    let settingId = $control.find('.control-setting-id').val();
+    let type = $(this).val();
+
+    $control.find('.php-snippet').text(generateSnippet(settingId, type));
+    updateHiddenData();
 });
 
-// 6. Helper function to output setting values in theme
-function dynamic_sections_get($setting_id, $type = 'text') {
+
+    $(document).on('keyup change','.section-title', function(){
+        let title = $(this).val();
+        let sectionId = labelToSlug(title);
+
+        let $section = $(this).closest('.dynamic-section');
+        $section.find('.section-id').val(sectionId);
+
+        $section.find('.control-item').each(function(){
+            let label = $(this).find('.control-label').val();
+            let settingId = sectionId + '_' + labelToSlug(label);
+            let type = $(this).find('.control-type').val();
+
+            $(this).find('.control-setting-id').val(settingId);
+            $(this).find('.php-snippet').text(generateSnippet(settingId, type));
+        });
+
+        updateHiddenData();
+    });
+
+    $(document).on('keyup change','.control-label', function(){
+        let $control = $(this).closest('.control-item');
+        let sectionId = $control.closest('.dynamic-section').find('.section-id').val();
+        let label = $(this).val();
+        let settingId = sectionId + '_' + labelToSlug(label);
+        let type = $control.find('.control-type').val();
+
+        $control.find('.control-setting-id').val(settingId);
+        $control.find('.php-snippet').text(generateSnippet(settingId, type));
+
+        updateHiddenData();
+    });
+
+    $(document).on('keyup change','.section-panel, .section-id, .section-priority, .control-type, .control-setting-id', updateHiddenData);
+
+    $('form').on('submit', updateHiddenData);
+
+});
+</script>
+
+<?php
+}
+
+/* -------------------------------------------------
+  5. Register admin setting
+---------------------------------------------------- */
+add_action('admin_init', function(){
+    register_setting('dcsb_group','dynamic_sections_data', [
+        'sanitize_callback' => function($input){
+            $data = json_decode($input, true);
+            return is_array($data) ? $input : '[]';
+        }
+    ]);
+});
+
+/* -------------------------------------------------
+  6. Helper function used in theme output
+---------------------------------------------------- */
+function dynamic_sections_get($setting_id, $type='text'){
+
     $value = get_theme_mod($setting_id);
-    if ($type === 'url') return esc_url($value);
-    if ($type === 'textarea') return esc_textarea($value);
-    if ($type === 'image') return esc_url($value);
+
+    if($type === 'url' || $type === 'image'){
+        return esc_url($value);
+    }
+
+    if($type === 'textarea'){
+        return wp_kses($value, dcsb_allow_all_html());
+    }
+
     return esc_html($value);
 }
 ?>
 
 
 
-
 =========================================================   dynamic-sections.js ======================================================
 
+jQuery(document).ready(function($){ let sectionCount = 0; 
+								   // Create "Add Section" button 
 
-jQuery(document).ready(function($){
-    let sectionCount = 0;
-
-    // Create "Add Section" button
-    const $sectionContainer = $('#customize-control-dynamic_sections_data').parent();
-    const $addBtn = $('<button type="button" class="button">Add Section</button>');
-    $sectionContainer.append($addBtn);
-
-    $addBtn.on('click', function(){
-        sectionCount++;
-
-        // Ask for section title
-        let title = prompt("Enter section title:", "Section " + sectionCount);
-        if(!title) return;
-
-        // Create section data
-        let sections = wp.customize('dynamic_sections_data')();
-        if(!sections) sections = [];
-        sections.push({
-            id: 'dynamic_section_' + sectionCount,
-            title: title,
-            priority: 30 + sectionCount,
-            controls: [
-                {id: 'text_' + sectionCount, type: 'text', label: 'Text Field'},
-                {id: 'textarea_' + sectionCount, type: 'textarea', label: 'Textarea Field'}
-            ]
-        });
-
-        // Update hidden setting
-        wp.customize('dynamic_sections_data', function(value){
-            value.set(JSON.stringify(sections));
-        });
-
-        alert("Section added! Save & refresh Customizer to see controls.");
-    });
-});
-
-
-
-
-
-
-
-
+								   const $sectionContainer = $('#customize-control-dynamic_sections_data').parent(); const $addBtn = $('<button type="button" class="button">Add Section</button>'); $sectionContainer.append($addBtn); $addBtn.on('click', function(){ sectionCount++;
+								   // Ask for section title 
+								   let title = prompt("Enter section title:", "Section " + sectionCount); if(!title) return;
+								   // Create section data 
+						let sections = wp.customize('dynamic_sections_data')(); if(!sections) sections = []; sections.push({ id: 'dynamic_section_' + sectionCount, title: title, priority: 30 + sectionCount, controls: [ {id: 'text_' + sectionCount, type: 'text', label: 'Text Field'}, {id: 'textarea_' + sectionCount, type: 'textarea', label: 'Textarea Field'} ] }); // Update hidden setting 
+						wp.customize('dynamic_sections_data', function(value){ value.set(JSON.stringify(sections)); }); alert("Section added! Save & refresh Customizer to see controls."); }); })
