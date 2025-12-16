@@ -126,7 +126,7 @@ add_action('customize_register', function($wp_customize){
 
             $wp_customize->add_section($section_id, [
                 'title'    => $section['title'],
-                'priority' => $section['priority'] ?? 30,
+                'priority' => $section['priority'] ?? 100,
                 'panel'    => $panel_id ?: null,
             ]);
 
@@ -215,7 +215,13 @@ function dcsb_admin_page(){
 
                 <?php foreach($sections as $i => $section): ?>
                     <div class="dynamic-section" data-index="<?= $i; ?>" style="border:1px solid #ccc;padding:10px;margin-bottom:20px;">
-                        <h2>Section <?= $i+1; ?></h2>
+                      <h2 class="dcsb-section-header" style="cursor:pointer;">
+    <span class="dcsb-toggle-icon dashicons dashicons-arrow-right-alt2"></span>
+    Section <?= $i+1; ?> — <?= esc_html($section['title']); ?>
+</h2>
+
+<div class="dcsb-section-body">
+
 
                         <p>
                             Panel: <input type="text" class="section-panel" value="<?= esc_attr($section['panel'] ?? ''); ?>">
@@ -267,6 +273,7 @@ $textarea = ($control['type'] === 'textarea') ? ", 'textarea'" : '';
 
                         <hr>
                     </div>
+						</div>
                 <?php endforeach; ?>
 
             </div>
@@ -280,6 +287,30 @@ $textarea = ($control['type'] === 'textarea') ? ", 'textarea'" : '';
         </form>
 
     </div>
+
+<style>
+.dcsb-section-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    background: #f1f1f1;
+    padding: 8px 12px;
+    border: 1px solid #ccc;
+}
+
+.dcsb-toggle-icon {
+    transition: transform 0.2s ease;
+}
+
+.dcsb-section-collapsed .dcsb-section-body {
+    display: none;
+}
+
+.dcsb-section-collapsed .dcsb-toggle-icon {
+    transform: rotate(-90deg);
+}
+</style>
+
 
 <script>
 jQuery(function($){
@@ -296,7 +327,8 @@ jQuery(function($){
                 panel: $(this).find('.section-panel').val(),
                 id: $(this).find('.section-id').val(),
                 title: $(this).find('.section-title').val(),
-                priority: parseInt($(this).find('.section-priority').val()) || 30,
+                priority: parseInt($(this).find('.section-priority').val()) || 100,
+
                 controls: []
             };
 
@@ -351,23 +383,36 @@ jQuery(function($){
 
         let index = $('#dynamic_sections_wrapper .dynamic-section').length;
 
-        let html = `<div class="dynamic-section" data-index="${index}" style="border:1px solid #ccc;padding:10px;margin-bottom:20px;">
-            <h2>Section ${index+1}</h2>
+       let html = `
+<div class="dynamic-section" data-index="${index}" style="border:1px solid #ccc;padding:10px;margin-bottom:20px;">
 
-            <p>Panel: <input type="text" class="section-panel"></p>
+    <h2 class="dcsb-section-header" style="cursor:pointer;">
+        <span class="dcsb-toggle-icon dashicons dashicons-arrow-right-alt2"></span>
+        Section ${index+1}
+    </h2>
 
-            <p>Section ID: <input type="text" class="section-id" value="section_${index+1}" style="width:260px;"></p>
+    <div class="dcsb-section-body">
 
-            <p>Title: <input type="text" class="section-title" value="Section ${index+1}">
-            Priority: <input type="number" class="section-priority" value="${30+index}" style="width:60px;"></p>
+        <p>Panel: <input type="text" class="section-panel"></p>
 
-            <div class="controls-wrapper"></div>
+        <p>Section ID:
+            <input type="text" class="section-id" value="section_${index+1}" style="width:260px;">
+        </p>
 
-            <button class="add-control button">Add Control</button>
-            <button class="delete-section button" style="background:#dc3545;color:#fff;">Delete Section</button>
+        <p>
+            Title: <input type="text" class="section-title" value="Section ${index+1}">
+            Priority: <input type="number" class="section-priority" value="${100+index}" style="width:60px;">
+        </p>
 
-            <hr>
-        </div>`;
+        <div class="controls-wrapper"></div>
+
+        <button class="add-control button">Add Control</button>
+        <button class="delete-section button" style="background:#dc3545;color:#fff;">Delete Section</button>
+
+        <hr>
+    </div>
+</div>`;
+
 
         $('#dynamic_sections_wrapper').append(html);
         updateHiddenData();
@@ -449,6 +494,23 @@ $(document).on('change', '.control-type', function () {
     $('form').on('submit', updateHiddenData);
 
 });
+	
+	jQuery(function($){
+
+    /* EXISTING CODE HERE */
+
+    // ✅ Toggle section open / close
+    $(document).on('click', '.dcsb-section-header', function (e) {
+        e.preventDefault();
+        e.stopPropagation();
+
+        let $section = $(this).closest('.dynamic-section');
+        $section.toggleClass('dcsb-section-collapsed');
+    });
+
+});
+
+	
 </script>
 
 <?php
@@ -460,11 +522,45 @@ $(document).on('change', '.control-type', function () {
 add_action('admin_init', function(){
     register_setting('dcsb_group','dynamic_sections_data', [
         'sanitize_callback' => function($input){
-            $data = json_decode($input, true);
-            return is_array($data) ? $input : '[]';
+
+            $new = json_decode($input, true);
+            if (!is_array($new)) return '[]';
+
+            $old = json_decode(get_option('dynamic_sections_data', '[]'), true);
+
+            // Collect old setting IDs
+            $old_ids = [];
+            foreach ($old as $section) {
+                foreach ($section['controls'] ?? [] as $control) {
+                    if (!empty($control['setting_id'])) {
+                        $old_ids[] = $control['setting_id'];
+                    }
+                }
+            }
+
+            // Collect new setting IDs
+            $new_ids = [];
+            foreach ($new as $section) {
+                foreach ($section['controls'] ?? [] as $control) {
+                    if (!empty($control['setting_id'])) {
+                        $new_ids[] = $control['setting_id'];
+                    }
+                }
+            }
+
+            // Find deleted settings
+            $deleted = array_diff($old_ids, $new_ids);
+
+            // Remove theme_mod values
+            foreach ($deleted as $setting_id) {
+                remove_theme_mod($setting_id);
+            }
+
+            return wp_json_encode($new);
         }
     ]);
 });
+
 
 /* -------------------------------------------------
   6. Helper function used in theme output
@@ -483,8 +579,6 @@ function dynamic_sections_get($setting_id, $type='text'){
 
     return esc_html($value);
 }
-?>
-
 
 
 =========================================================   dynamic-sections.js ======================================================
