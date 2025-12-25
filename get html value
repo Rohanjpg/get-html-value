@@ -3,7 +3,7 @@
 Plugin Name: Dynamic Customizer Sections Builder
 Description: Create unlimited Customizer panels, sections & controls dynamically from an admin page. Includes auto-generated PHP snippets.
 Version: 1.5
-Author: Bhagwan Singh
+Author: Bhagwan Singh 
 */
 
 /**
